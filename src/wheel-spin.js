@@ -34,6 +34,7 @@ async function readState() {
 }
 
 async function writeState(state) {
+  await fs.mkdir(path.dirname(path.resolve(STATE_FILE)), { recursive: true });
   await fs.writeFile(STATE_FILE, JSON.stringify(state, null, 2));
 }
 
@@ -314,7 +315,17 @@ async function getBodyText(cdp) {
 }
 
 function hasReachedDailyLimit(text) {
-  return /今日.*(已|已经).*(用完|上限|完成)|次数不足|明天再来|已达.*上限|没有.*次数/.test(text);
+  return /今日.*(已|已经).*(用完|上限|完成)|今日剩余转盘次数\s*:\s*0\s*\/\s*\d+|次数不足|明天再来|已达.*上限|没有.*次数/.test(text);
+}
+
+function getRemainingSpinsFromText(text) {
+  const match = text.match(/今日剩余转盘次数\s*:\s*(\d+)\s*\/\s*(\d+)/);
+
+  if (!match) {
+    return null;
+  }
+
+  return Number(match[1]);
 }
 
 async function createUserDataDir() {
@@ -404,9 +415,23 @@ async function main() {
     await cdp.send("Page.navigate", { url: TARGET_URL });
     await waitForLoad(cdp);
 
-    let successCount = 0;
+    const initialBodyText = await getBodyText(cdp);
+    const pageRemaining = getRemainingSpinsFromText(initialBodyText);
 
-    for (let i = 0; i < remaining; i += 1) {
+    if (pageRemaining === 0 || hasReachedDailyLimit(initialBodyText)) {
+      console.log(`[${today}] Page says no spins remain today. Recording ${MAX_DAILY_SPINS}/${MAX_DAILY_SPINS}.`);
+      state[today] = {
+        spins: MAX_DAILY_SPINS,
+        updatedAt: new Date().toISOString()
+      };
+      await writeState(state);
+      return;
+    }
+
+    let successCount = 0;
+    const spinLimit = pageRemaining === null ? remaining : Math.min(remaining, pageRemaining);
+
+    for (let i = 0; i < spinLimit; i += 1) {
       const spinNumber = used + i + 1;
       console.log(`[${today}] Spin ${spinNumber}/${MAX_DAILY_SPINS}...`);
 
