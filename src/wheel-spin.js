@@ -12,6 +12,7 @@ const HEADLESS = process.env.HEADLESS !== "false";
 const STATE_FILE = process.env.STATE_FILE || path.resolve("wheel-state.json");
 const CHROME_BIN = process.env.CHROME_BIN || "";
 const DEBUG_PORT = Number(process.env.CHROME_DEBUG_PORT || 9222);
+const CHROME_NO_SANDBOX = process.env.CHROME_NO_SANDBOX !== "false";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -330,6 +331,10 @@ function launchChrome(userDataDir) {
     "--disable-gpu",
     "--window-size=1280,900"
   ];
+
+  if (CHROME_NO_SANDBOX) {
+    args.push("--no-sandbox");
+  }
 
   if (HEADLESS) {
     args.push("--headless=new");

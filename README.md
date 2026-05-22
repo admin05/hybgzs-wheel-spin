@@ -23,6 +23,7 @@ HYBGZS_MAX_DAILY_SPINS=3
 HYBGZS_CLICK_INTERVAL_MS=9000
 HEADLESS=true
 CHROME_BIN="/Arcadia 提供的 Chromium 可执行文件路径"
+CHROME_NO_SANDBOX=true
 ```
 
 Cookie 获取方式：
@@ -49,6 +50,12 @@ npm run arcadia
 ```
 
 脚本会使用 Arcadia 环境变量 `CHROME_BIN` 指向的 Chromium。如果 `CHROME_BIN` 没有设置、文件不存在或不可执行，脚本会直接输出明确错误。
+
+Arcadia 如果以 root 运行 Chromium，需要 `--no-sandbox`。脚本默认会加这个参数；如果你的环境不需要，可以设置：
+
+```bash
+CHROME_NO_SANDBOX=false
+```
 
 如果 Arcadia 的 9222 端口被占用，可以额外设置：
 
