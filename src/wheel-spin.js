@@ -13,6 +13,7 @@ const STATE_FILE = process.env.STATE_FILE || path.resolve("wheel-state.json");
 const CHROME_BIN = process.env.CHROME_BIN || "";
 const DEBUG_PORT = Number(process.env.CHROME_DEBUG_PORT || 9222);
 const CHROME_NO_SANDBOX = process.env.CHROME_NO_SANDBOX !== "false";
+const CHROME_VERBOSE = process.env.CHROME_VERBOSE === "true";
 const BARK = (process.env.BARK || "").trim();
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -419,21 +420,23 @@ function launchChrome(userDataDir) {
 
   args.push("about:blank");
 
-  console.log(`[browser] Launching Chromium from CHROME_BIN: ${CHROME_BIN}`);
+  console.log("[browser] Launching Chromium.");
 
   const chrome = spawn(CHROME_BIN, args, {
     stdio: ["ignore", "pipe", "pipe"]
   });
 
-  chrome.stdout.on("data", (data) => {
-    const text = data.toString().trim();
-    if (text) console.log(`[chromium] ${text}`);
-  });
+  if (CHROME_VERBOSE) {
+    chrome.stdout.on("data", (data) => {
+      const text = data.toString().trim();
+      if (text) console.log(`[chromium] ${text}`);
+    });
 
-  chrome.stderr.on("data", (data) => {
-    const text = data.toString().trim();
-    if (text) console.error(`[chromium] ${text}`);
-  });
+    chrome.stderr.on("data", (data) => {
+      const text = data.toString().trim();
+      if (text) console.error(`[chromium] ${text}`);
+    });
+  }
 
   return chrome;
 }

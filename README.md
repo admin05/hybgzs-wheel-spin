@@ -24,6 +24,7 @@ HYBGZS_CLICK_INTERVAL_MS=9000
 HEADLESS=true
 CHROME_BIN="/Arcadia 提供的 Chromium 可执行文件路径"
 CHROME_NO_SANDBOX=true
+CHROME_VERBOSE=false
 BARK="你的 Bark key 或完整 Bark URL"
 ```
 
@@ -62,6 +63,12 @@ CHROME_NO_SANDBOX=false
 
 ```bash
 CHROME_DEBUG_PORT=9223
+```
+
+默认不会输出 Chromium 自身的 DBus、DevTools 等无关日志。如果需要排查浏览器启动问题，可以临时设置：
+
+```bash
+CHROME_VERBOSE=true
 ```
 
 ## Bark 推送
