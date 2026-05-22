@@ -47,5 +47,21 @@ npm start
 任务命令：
 
 ```bash
+npm run arcadia
+```
+
+如果 Arcadia 支持单独的安装命令，也可以这样配置：
+
+安装命令：
+
+```bash
+npm run setup
+```
+
+运行命令：
+
+```bash
 npm start
 ```
+
+如果看到 `Cannot find package 'playwright'`，说明运行前没有安装依赖。请使用上面的 `npm run arcadia`，或者先执行 `npm install`。

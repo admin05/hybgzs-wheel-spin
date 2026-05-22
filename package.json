@@ -5,6 +5,8 @@
   "description": "HYBGZS wheel auto spin script for Arcadia/NAS scheduled jobs",
   "type": "module",
   "scripts": {
+    "setup": "npm install && npx playwright install chromium",
+    "arcadia": "npm install && npx playwright install chromium && node src/wheel-spin.js",
     "start": "node src/wheel-spin.js"
   },
   "dependencies": {
