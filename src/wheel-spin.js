@@ -13,6 +13,7 @@ const STATE_FILE = process.env.STATE_FILE || path.resolve("wheel-state.json");
 const CHROME_BIN = process.env.CHROME_BIN || "";
 const DEBUG_PORT = Number(process.env.CHROME_DEBUG_PORT || 9222);
 const CHROME_NO_SANDBOX = process.env.CHROME_NO_SANDBOX !== "false";
+const BARK = (process.env.BARK || "").trim();
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -36,6 +37,71 @@ async function readState() {
 async function writeState(state) {
   await fs.mkdir(path.dirname(path.resolve(STATE_FILE)), { recursive: true });
   await fs.writeFile(STATE_FILE, JSON.stringify(state, null, 2));
+}
+
+function resolveBarkConfig() {
+  if (!BARK) {
+    return null;
+  }
+
+  const isUrl = /^https?:\/\//i.test(BARK);
+
+  if (!isUrl) {
+    return {
+      server: "https://api.day.app",
+      key: BARK
+    };
+  }
+
+  const parsed = new URL(BARK);
+  const parts = parsed.pathname.split("/").filter(Boolean);
+
+  if (parts.length === 0) {
+    throw new Error("BARK URL must include Bark key, for example https://api.day.app/YOUR_KEY.");
+  }
+
+  return {
+    server: `${parsed.protocol}//${parsed.host}`,
+    key: parts[0]
+  };
+}
+
+async function pushBark(title, body) {
+  const bark = resolveBarkConfig();
+
+  if (!bark) {
+    console.warn("[bark] BARK is not set. Skipping push notification.");
+    return;
+  }
+
+  const base = bark.server.replace(/\/+$/, "");
+  const url = new URL(
+    `${base}/${encodeURIComponent(bark.key)}/${encodeURIComponent(title)}/${encodeURIComponent(body)}`
+  );
+  url.searchParams.set("group", "HYBGZS");
+
+  const response = await fetch(url);
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`Bark push failed: HTTP ${response.status} ${text.slice(0, 200)}`);
+  }
+
+  const result = await response.json().catch(() => null);
+
+  if (result && result.code !== 200) {
+    throw new Error(`Bark push failed: ${JSON.stringify(result)}`);
+  }
+
+  console.log("[bark] Push sent.");
+}
+
+async function safePushBark(title, body) {
+  try {
+    await pushBark(title, body);
+  } catch (error) {
+    console.error(`[bark] ${error.message}`);
+  }
 }
 
 async function requireChromeBin() {
@@ -425,6 +491,7 @@ async function main() {
         updatedAt: new Date().toISOString()
       };
       await writeState(state);
+      await safePushBark("幸运转盘", `${today} 今日剩余次数 0/${MAX_DAILY_SPINS}，已记录完成。`);
       return;
     }
 
@@ -464,6 +531,10 @@ async function main() {
 
     await writeState(state);
     console.log(`[${today}] Done. Recorded ${state[today].spins}/${MAX_DAILY_SPINS} spins.`);
+    await safePushBark(
+      "幸运转盘",
+      `${today} 执行完成，本次点击 ${successCount} 次，已记录 ${state[today].spins}/${MAX_DAILY_SPINS}。`
+    );
   } finally {
     cdp?.close();
     chrome.kill("SIGTERM");
@@ -471,7 +542,8 @@ async function main() {
   }
 }
 
-main().catch((error) => {
+main().catch(async (error) => {
   console.error(error);
+  await safePushBark("幸运转盘失败", error.message || String(error));
   process.exit(1);
 });

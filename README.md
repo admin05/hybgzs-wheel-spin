@@ -24,6 +24,7 @@ HYBGZS_CLICK_INTERVAL_MS=9000
 HEADLESS=true
 CHROME_BIN="/Arcadia 提供的 Chromium 可执行文件路径"
 CHROME_NO_SANDBOX=true
+BARK="你的 Bark key 或完整 Bark URL"
 ```
 
 Cookie 获取方式：
@@ -61,4 +62,20 @@ CHROME_NO_SANDBOX=false
 
 ```bash
 CHROME_DEBUG_PORT=9223
+```
+
+## Bark 推送
+
+脚本会读取 Arcadia 环境变量 `BARK`，并在运行完成、今日无剩余次数或运行失败时推送通知。
+
+`BARK` 支持两种写法：
+
+```bash
+BARK="YOUR_KEY"
+```
+
+或：
+
+```bash
+BARK="https://api.day.app/YOUR_KEY"
 ```
