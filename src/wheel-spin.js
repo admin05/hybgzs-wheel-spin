@@ -1,5 +1,6 @@
 import { chromium } from "playwright";
 import fs from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import path from "node:path";
 
 const TARGET_URL = process.env.HYBGZS_WHEEL_URL || "https://cdk.hybgzs.com/entertainment/wheel";
@@ -8,6 +9,7 @@ const MAX_DAILY_SPINS = Number(process.env.HYBGZS_MAX_DAILY_SPINS || 3);
 const CLICK_INTERVAL_MS = Number(process.env.HYBGZS_CLICK_INTERVAL_MS || 9000);
 const HEADLESS = process.env.HEADLESS !== "false";
 const STATE_FILE = process.env.STATE_FILE || path.resolve("wheel-state.json");
+const CHROME_BIN = process.env.CHROME_BIN || "";
 
 function getTodayKey() {
   return new Intl.DateTimeFormat("en-CA", {
@@ -28,6 +30,33 @@ async function readState() {
 
 async function writeState(state) {
   await fs.writeFile(STATE_FILE, JSON.stringify(state, null, 2));
+}
+
+async function getChromeLaunchOptions() {
+  const launchOptions = { headless: HEADLESS };
+
+  if (!CHROME_BIN) {
+    console.warn("[browser] CHROME_BIN is not set. Falling back to Playwright's bundled Chromium.");
+    return launchOptions;
+  }
+
+  try {
+    await fs.access(CHROME_BIN, fsConstants.X_OK);
+  } catch (error) {
+    throw new Error(
+      [
+        `CHROME_BIN points to a browser that cannot be executed: ${CHROME_BIN}`,
+        `Access check failed: ${error.message}`,
+        "Please set CHROME_BIN to the full Chromium executable path in Arcadia."
+      ].join("\n")
+    );
+  }
+
+  console.log(`[browser] Using Chromium from CHROME_BIN: ${CHROME_BIN}`);
+  return {
+    ...launchOptions,
+    executablePath: CHROME_BIN
+  };
 }
 
 function parseCookieHeader(cookieHeader, domain) {
@@ -111,7 +140,24 @@ async function main() {
     return;
   }
 
-  const browser = await chromium.launch({ headless: HEADLESS });
+  const launchOptions = await getChromeLaunchOptions();
+  let browser;
+
+  try {
+    browser = await chromium.launch(launchOptions);
+  } catch (error) {
+    if (CHROME_BIN) {
+      throw new Error(
+        [
+          `Failed to launch Chromium from CHROME_BIN: ${CHROME_BIN}`,
+          `Launch error: ${error.message}`,
+          "Please verify that Arcadia's CHROME_BIN points to a working Chromium executable."
+        ].join("\n")
+      );
+    }
+
+    throw error;
+  }
 
   try {
     const context = await browser.newContext({
@@ -161,7 +207,7 @@ async function main() {
     await writeState(state);
     console.log(`[${today}] Done. Recorded ${state[today].spins}/${MAX_DAILY_SPINS} spins.`);
   } finally {
-    await browser.close();
+    await browser?.close();
   }
 }
 
