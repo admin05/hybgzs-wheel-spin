@@ -1,5 +1,7 @@
+import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 const TARGET_URL = process.env.HYBGZS_WHEEL_URL || "https://cdk.hybgzs.com/entertainment/wheel";
@@ -9,6 +11,9 @@ const CLICK_INTERVAL_MS = Number(process.env.HYBGZS_CLICK_INTERVAL_MS || 9000);
 const HEADLESS = process.env.HEADLESS !== "false";
 const STATE_FILE = process.env.STATE_FILE || path.resolve("wheel-state.json");
 const CHROME_BIN = process.env.CHROME_BIN || "";
+const DEBUG_PORT = Number(process.env.CHROME_DEBUG_PORT || 9222);
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function getTodayKey() {
   return new Intl.DateTimeFormat("en-CA", {
@@ -31,36 +36,9 @@ async function writeState(state) {
   await fs.writeFile(STATE_FILE, JSON.stringify(state, null, 2));
 }
 
-async function loadPlaywright() {
-  try {
-    const playwright = await import("playwright");
-
-    if (!playwright.chromium) {
-      throw new Error("The installed playwright package does not export chromium.");
-    }
-
-    return playwright;
-  } catch (error) {
-    if (error.code === "ERR_MODULE_NOT_FOUND" || /Cannot find package 'playwright'/.test(error.message)) {
-      throw new Error(
-        [
-          "Playwright is not available in this Arcadia runtime.",
-          "Please enable Arcadia's Playwright runtime/package, or run npm install before starting this task.",
-          `Original error: ${error.message}`
-        ].join("\n")
-      );
-    }
-
-    throw error;
-  }
-}
-
-async function getChromeLaunchOptions() {
-  const launchOptions = { headless: HEADLESS };
-
+async function requireChromeBin() {
   if (!CHROME_BIN) {
-    console.warn("[browser] CHROME_BIN is not set. Falling back to Playwright's bundled Chromium.");
-    return launchOptions;
+    throw new Error("Missing CHROME_BIN. Please set Arcadia's Chromium executable path in CHROME_BIN.");
   }
 
   try {
@@ -74,15 +52,158 @@ async function getChromeLaunchOptions() {
       ].join("\n")
     );
   }
+}
 
-  console.log(`[browser] Using Chromium from CHROME_BIN: ${CHROME_BIN}`);
+async function getJson(url, timeoutMs = 10000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status} ${response.statusText}`);
+    }
+
+    return await response.json();
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function waitForDevTools(port) {
+  const versionUrl = `http://127.0.0.1:${port}/json/version`;
+  const deadline = Date.now() + 15000;
+  let lastError;
+
+  while (Date.now() < deadline) {
+    try {
+      return await getJson(versionUrl, 2000);
+    } catch (error) {
+      lastError = error;
+      await sleep(300);
+    }
+  }
+
+  throw new Error(`Chromium DevTools did not become ready on port ${port}. Last error: ${lastError?.message}`);
+}
+
+async function createPage(port) {
+  const response = await fetch(`http://127.0.0.1:${port}/json/new?${encodeURIComponent("about:blank")}`, {
+    method: "PUT"
+  });
+
+  if (!response.ok) {
+    throw new Error(`Could not create a Chromium tab. HTTP ${response.status} ${response.statusText}`);
+  }
+
+  const pageInfo = await response.json();
+
+  if (!pageInfo.webSocketDebuggerUrl) {
+    throw new Error("Chromium did not return a page WebSocket debugger URL.");
+  }
+
+  return pageInfo.webSocketDebuggerUrl;
+}
+
+function createCdpClient(webSocketUrl) {
+  const ws = new WebSocket(webSocketUrl);
+  let id = 0;
+  const pending = new Map();
+  const events = new Map();
+
+  ws.addEventListener("message", (message) => {
+    const data = JSON.parse(message.data);
+
+    if (data.id && pending.has(data.id)) {
+      const { resolve, reject } = pending.get(data.id);
+      pending.delete(data.id);
+
+      if (data.error) {
+        reject(new Error(data.error.message || JSON.stringify(data.error)));
+      } else {
+        resolve(data.result || {});
+      }
+
+      return;
+    }
+
+    const handlers = events.get(data.method) || [];
+    for (const handler of handlers) {
+      handler(data.params || {});
+    }
+  });
+
+  function send(method, params = {}) {
+    id += 1;
+    const messageId = id;
+
+    return new Promise((resolve, reject) => {
+      pending.set(messageId, { resolve, reject });
+      ws.send(JSON.stringify({ id: messageId, method, params }));
+    });
+  }
+
+  function on(method, handler) {
+    const handlers = events.get(method) || [];
+    handlers.push(handler);
+    events.set(method, handlers);
+  }
+
+  async function waitOpen() {
+    if (ws.readyState === WebSocket.OPEN) {
+      return;
+    }
+
+    await new Promise((resolve, reject) => {
+      ws.addEventListener("open", resolve, { once: true });
+      ws.addEventListener("error", reject, { once: true });
+    });
+  }
+
   return {
-    ...launchOptions,
-    executablePath: CHROME_BIN
+    close: () => ws.close(),
+    on,
+    send,
+    waitOpen
   };
 }
 
-function parseCookieHeader(cookieHeader, domain) {
+async function waitForLoad(cdp, timeoutMs = 60000) {
+  let loaded = false;
+
+  cdp.on("Page.loadEventFired", () => {
+    loaded = true;
+  });
+
+  const deadline = Date.now() + timeoutMs;
+
+  while (!loaded && Date.now() < deadline) {
+    await sleep(300);
+  }
+
+  if (!loaded) {
+    throw new Error(`Page did not finish loading within ${timeoutMs} ms.`);
+  }
+
+  await sleep(1500);
+}
+
+async function evaluate(cdp, expression, awaitPromise = true) {
+  const result = await cdp.send("Runtime.evaluate", {
+    expression,
+    awaitPromise,
+    returnByValue: true
+  });
+
+  if (result.exceptionDetails) {
+    throw new Error(result.exceptionDetails.text || "Runtime.evaluate failed.");
+  }
+
+  return result.result?.value;
+}
+
+function parseCookieHeader(cookieHeader) {
   return cookieHeader
     .split(";")
     .map((part) => part.trim())
@@ -97,61 +218,150 @@ function parseCookieHeader(cookieHeader, domain) {
       return {
         name: part.slice(0, separatorIndex),
         value: part.slice(separatorIndex + 1),
-        domain,
+        domain: "cdk.hybgzs.com",
         path: "/",
-        httpOnly: false,
-        secure: true,
-        sameSite: "Lax"
+        secure: true
       };
     })
     .filter(Boolean);
 }
 
-async function clickFirstVisible(locator) {
-  const count = await locator.count().catch(() => 0);
+async function setCookies(cdp) {
+  const cookies = parseCookieHeader(COOKIE);
 
-  for (let i = 0; i < count; i += 1) {
-    const item = locator.nth(i);
-
-    try {
-      await item.waitFor({ state: "visible", timeout: 1500 });
-      await item.click({ timeout: 5000 });
-      return true;
-    } catch {
-      // Continue to the next likely control.
-    }
+  if (cookies.length === 0) {
+    throw new Error("HYBGZS_COOKIE did not contain any valid cookie pairs.");
   }
 
-  return false;
+  await cdp.send("Network.setCookies", { cookies });
 }
 
-async function clickSpin(page) {
-  const candidates = [
-    page.getByRole("button", { name: /抽奖|转动|开始|立即|签到|spin|start|draw/i }),
-    page.locator("button, a, [role='button']").filter({
-      hasText: /抽奖|转动|开始|立即|签到|spin|start|draw/i
-    }),
-    page.locator("[class*='spin'], [class*='wheel'], [class*='start'], [class*='draw'], [class*='lottery']"),
-    page.locator("canvas")
-  ];
+async function clickSpin(cdp) {
+  const expression = `(() => {
+    const isVisible = (el) => {
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 &&
+        rect.height > 0 &&
+        style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        style.opacity !== "0";
+    };
 
-  for (const locator of candidates) {
-    if (await clickFirstVisible(locator)) {
-      return true;
+    const textPattern = /抽奖|转动|开始|立即|签到|spin|start|draw/i;
+    const selectors = [
+      "button",
+      "a",
+      "[role='button']",
+      "[class*='spin']",
+      "[class*='wheel']",
+      "[class*='start']",
+      "[class*='draw']",
+      "[class*='lottery']",
+      "canvas"
+    ];
+    const candidates = Array.from(document.querySelectorAll(selectors.join(",")))
+      .filter(isVisible);
+
+    let target = candidates.find((el) => {
+      const text = el.innerText || el.textContent || "";
+      const className = typeof el.className === "string" ? el.className : "";
+      return textPattern.test(text) || textPattern.test(className);
+    });
+
+    if (!target) {
+      target = candidates
+        .slice()
+        .sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          return br.width * br.height - ar.width * ar.height;
+        })[0];
     }
-  }
 
-  return false;
+    if (!target) {
+      return false;
+    }
+
+    target.scrollIntoView({ block: "center", inline: "center" });
+    const rect = target.getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+
+    for (const type of ["pointerdown", "mousedown", "mouseup", "pointerup", "click"]) {
+      target.dispatchEvent(new MouseEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+        clientX: x,
+        clientY: y
+      }));
+    }
+
+    if (typeof target.click === "function") {
+      target.click();
+    }
+
+    return true;
+  })()`;
+
+  return Boolean(await evaluate(cdp, expression));
+}
+
+async function getBodyText(cdp) {
+  return (await evaluate(cdp, "document.body ? document.body.innerText : ''")) || "";
 }
 
 function hasReachedDailyLimit(text) {
   return /今日.*(已|已经).*(用完|上限|完成)|次数不足|明天再来|已达.*上限|没有.*次数/.test(text);
 }
 
+async function createUserDataDir() {
+  return fs.mkdtemp(path.join(os.tmpdir(), "hybgzs-wheel-chrome-"));
+}
+
+function launchChrome(userDataDir) {
+  const args = [
+    `--remote-debugging-port=${DEBUG_PORT}`,
+    `--user-data-dir=${userDataDir}`,
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--window-size=1280,900"
+  ];
+
+  if (HEADLESS) {
+    args.push("--headless=new");
+  }
+
+  args.push("about:blank");
+
+  console.log(`[browser] Launching Chromium from CHROME_BIN: ${CHROME_BIN}`);
+
+  const chrome = spawn(CHROME_BIN, args, {
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+
+  chrome.stdout.on("data", (data) => {
+    const text = data.toString().trim();
+    if (text) console.log(`[chromium] ${text}`);
+  });
+
+  chrome.stderr.on("data", (data) => {
+    const text = data.toString().trim();
+    if (text) console.error(`[chromium] ${text}`);
+  });
+
+  return chrome;
+}
+
 async function main() {
   if (!COOKIE) {
     throw new Error("Missing HYBGZS_COOKIE. Put your logged-in browser Cookie header in this environment variable.");
   }
+
+  await requireChromeBin();
 
   const state = await readState();
   const today = getTodayKey();
@@ -163,37 +373,31 @@ async function main() {
     return;
   }
 
-  const { chromium } = await loadPlaywright();
-  const launchOptions = await getChromeLaunchOptions();
-  let browser;
+  const userDataDir = await createUserDataDir();
+  const chrome = launchChrome(userDataDir);
+  let cdp;
 
   try {
-    browser = await chromium.launch(launchOptions);
-  } catch (error) {
-    if (CHROME_BIN) {
-      throw new Error(
-        [
-          `Failed to launch Chromium from CHROME_BIN: ${CHROME_BIN}`,
-          `Launch error: ${error.message}`,
-          "Please verify that Arcadia's CHROME_BIN points to a working Chromium executable."
-        ].join("\n")
-      );
-    }
-
-    throw error;
-  }
-
-  try {
-    const context = await browser.newContext({
-      viewport: { width: 1280, height: 900 },
-      locale: "zh-CN",
-      timezoneId: "Asia/Shanghai"
+    chrome.on("exit", (code, signal) => {
+      if (code !== 0 && signal !== "SIGTERM") {
+        console.error(`[browser] Chromium exited unexpectedly. code=${code} signal=${signal}`);
+      }
     });
 
-    await context.addCookies(parseCookieHeader(COOKIE, "cdk.hybgzs.com"));
+    await waitForDevTools(DEBUG_PORT);
+    const webSocketUrl = await createPage(DEBUG_PORT);
+    cdp = createCdpClient(webSocketUrl);
+    await cdp.waitOpen();
 
-    const page = await context.newPage();
-    await page.goto(TARGET_URL, { waitUntil: "networkidle", timeout: 60000 });
+    await cdp.send("Page.enable");
+    await cdp.send("Runtime.enable");
+    await cdp.send("Network.enable");
+    await cdp.send("Emulation.setTimezoneOverride", { timezoneId: "Asia/Shanghai" });
+    await cdp.send("Emulation.setLocaleOverride", { locale: "zh-CN" });
+    await setCookies(cdp);
+
+    await cdp.send("Page.navigate", { url: TARGET_URL });
+    await waitForLoad(cdp);
 
     let successCount = 0;
 
@@ -201,16 +405,16 @@ async function main() {
       const spinNumber = used + i + 1;
       console.log(`[${today}] Spin ${spinNumber}/${MAX_DAILY_SPINS}...`);
 
-      const clicked = await clickSpin(page);
+      const clicked = await clickSpin(cdp);
 
       if (!clicked) {
         throw new Error("Could not find the wheel spin button/control. The page selector may need adjustment.");
       }
 
       successCount += 1;
-      await page.waitForTimeout(CLICK_INTERVAL_MS);
+      await sleep(CLICK_INTERVAL_MS);
 
-      const bodyText = await page.locator("body").innerText().catch(() => "");
+      const bodyText = await getBodyText(cdp);
       const summary = bodyText.slice(0, 500).replace(/\s+/g, " ").trim();
 
       if (summary) {
@@ -231,7 +435,9 @@ async function main() {
     await writeState(state);
     console.log(`[${today}] Done. Recorded ${state[today].spins}/${MAX_DAILY_SPINS} spins.`);
   } finally {
-    await browser?.close();
+    cdp?.close();
+    chrome.kill("SIGTERM");
+    await fs.rm(userDataDir, { recursive: true, force: true });
   }
 }
 
