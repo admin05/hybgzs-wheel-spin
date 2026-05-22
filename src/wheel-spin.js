@@ -1,4 +1,3 @@
-import { chromium } from "playwright";
 import fs from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import path from "node:path";
@@ -30,6 +29,30 @@ async function readState() {
 
 async function writeState(state) {
   await fs.writeFile(STATE_FILE, JSON.stringify(state, null, 2));
+}
+
+async function loadPlaywright() {
+  try {
+    const playwright = await import("playwright");
+
+    if (!playwright.chromium) {
+      throw new Error("The installed playwright package does not export chromium.");
+    }
+
+    return playwright;
+  } catch (error) {
+    if (error.code === "ERR_MODULE_NOT_FOUND" || /Cannot find package 'playwright'/.test(error.message)) {
+      throw new Error(
+        [
+          "Playwright is not available in this Arcadia runtime.",
+          "Please enable Arcadia's Playwright runtime/package, or run npm install before starting this task.",
+          `Original error: ${error.message}`
+        ].join("\n")
+      );
+    }
+
+    throw error;
+  }
 }
 
 async function getChromeLaunchOptions() {
@@ -140,6 +163,7 @@ async function main() {
     return;
   }
 
+  const { chromium } = await loadPlaywright();
   const launchOptions = await getChromeLaunchOptions();
   let browser;
 

@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "setup": "npm install",
-    "arcadia": "npm install && node src/wheel-spin.js",
+    "arcadia": "node src/wheel-spin.js",
     "start": "node src/wheel-spin.js"
   },
   "dependencies": {

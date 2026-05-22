@@ -50,6 +50,8 @@ npm start
 npm run arcadia
 ```
 
+Arcadia 需要提供 `playwright` 这个 npm 包。脚本启动时会检测 `playwright` 是否可用；如果不可用，会输出明确错误信息，不会只显示 Node.js 的 `ERR_MODULE_NOT_FOUND` 堆栈。
+
 脚本会优先使用 Arcadia 环境变量 `CHROME_BIN` 指向的 Chromium。如果 `CHROME_BIN` 没有设置，会尝试使用 Playwright 自带的 Chromium；如果 `CHROME_BIN` 指向的文件不存在、不可执行或启动失败，脚本会直接输出明确错误。
 
 如果 Arcadia 支持单独的安装命令，也可以这样配置：
@@ -66,4 +68,4 @@ npm run setup
 npm start
 ```
 
-如果看到 `Cannot find package 'playwright'`，说明运行前没有安装依赖。请使用上面的 `npm run arcadia`，或者先执行 `npm install`。
+如果脚本提示 `Playwright is not available in this Arcadia runtime`，说明当前 Arcadia 运行环境没有提供 `playwright`。请启用 Arcadia 的 Playwright/npm 依赖环境，或者先执行 `npm install`。
