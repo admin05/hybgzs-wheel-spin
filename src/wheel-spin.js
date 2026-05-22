@@ -455,6 +455,7 @@ async function main() {
 
   if (remaining === 0) {
     console.log(`[${today}] Already recorded ${used}/${MAX_DAILY_SPINS} spins. Nothing to do.`);
+    await safePushBark("幸运转盘", `${today} 本地记录已完成 ${used}/${MAX_DAILY_SPINS}，无需重复执行。`);
     return;
   }
 
