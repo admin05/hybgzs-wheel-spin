@@ -1,0 +1,5 @@
+node_modules/
+.env
+wheel-state.json
+playwright-report/
+test-results/

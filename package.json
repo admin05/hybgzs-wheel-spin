@@ -1,0 +1,13 @@
+{
+  "name": "hybgzs-wheel-spin",
+  "version": "1.0.0",
+  "private": true,
+  "description": "HYBGZS wheel auto spin script for Arcadia/NAS scheduled jobs",
+  "type": "module",
+  "scripts": {
+    "start": "node src/wheel-spin.js"
+  },
+  "dependencies": {
+    "playwright": "^1.52.0"
+  }
+}
