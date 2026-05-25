@@ -638,6 +638,57 @@ async function waitForConfirmedSpin(cdp, before, timeoutMs = SPIN_RESULT_TIMEOUT
   };
 }
 
+async function callWheelSpinApi(cdp) {
+  const expression = `fetch("/api/wheel", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    credentials: "include",
+    body: "{}"
+  }).then(async (response) => {
+    const text = await response.text();
+    let json = null;
+
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {}
+
+    return {
+      ok: response.ok,
+      status: response.status,
+      statusText: response.statusText,
+      json,
+      text: text.slice(0, 500)
+    };
+  })`;
+
+  const result = await evaluate(cdp, expression);
+
+  if (!result?.ok) {
+    const message = result?.json?.error || result?.text || result?.statusText || "unknown error";
+    throw new Error(`Wheel API failed: HTTP ${result?.status ?? "unknown"} ${message}`);
+  }
+
+  if (result.json?.success === false) {
+    throw new Error(`Wheel API failed: ${result.json.error || JSON.stringify(result.json)}`);
+  }
+
+  if (!result.json?.data) {
+    throw new Error(`Wheel API returned unexpected response: ${JSON.stringify(result.json)}`);
+  }
+
+  return result.json.data;
+}
+
+function describePrize(data) {
+  const prizeName = data?.prize?.name || "unknown prize";
+  const amount = Number(data?.prize?.amount || 0);
+  const reward = amount > 0 ? ` +$${(amount / 500000).toFixed(2)}` : "";
+  const remaining = typeof data?.remainingSpins === "number" ? `, remaining ${data.remainingSpins}` : "";
+  return `${prizeName}${reward}${remaining}`;
+}
+
 async function createUserDataDir() {
   return fs.mkdtemp(path.join(os.tmpdir(), "hybgzs-wheel-chrome-"));
 }
@@ -752,38 +803,16 @@ async function main() {
       const spinNumber = pageUsed + i + 1;
       console.log(`[${today}] Spin ${spinNumber}/${MAX_DAILY_SPINS}...`);
 
-      const before = await getPageSnapshot(cdp);
-      const target = await clickSpin(cdp);
-
-      if (!target) {
-        throw new Error("Could not find the wheel spin button/control. The page selector may need adjustment.");
-      }
-
-      console.log(`[${today}] Clicked ${describeTarget(target)}.`);
-
-      const result = await waitForConfirmedSpin(cdp, before);
-      const { snapshot } = result;
-
-      if (snapshot.summary) {
-        console.log(`[${today}] Page text: ${snapshot.summary}`);
-      }
-
-      if (!result.confirmed) {
-        const details = [
-          `Clicked target did not change page state within ${SPIN_RESULT_TIMEOUT_MS} ms.`,
-          `Target: ${describeTarget(target)}.`,
-          `Remaining before/after: ${before.remaining ?? "unknown"}/${snapshot.remaining ?? "unknown"}.`,
-          `Balance before/after: ${before.balance ?? "unknown"}/${snapshot.balance ?? "unknown"}.`
-        ];
-        throw new Error(details.join(" "));
-      }
-
+      const result = await callWheelSpinApi(cdp);
+      console.log(`[${today}] Wheel API result: ${describePrize(result)}.`);
       successCount += 1;
 
-      if (snapshot.limitReached) {
-        console.log(`[${today}] Page says daily limit reached.`);
+      if (typeof result.remainingSpins === "number" && result.remainingSpins <= 0) {
+        console.log(`[${today}] Wheel API says daily limit reached.`);
         break;
       }
+
+      await sleep(CLICK_INTERVAL_MS);
     }
 
     state[today] = {
