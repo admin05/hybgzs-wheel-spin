@@ -326,10 +326,11 @@ async function findSpinTarget(cdp) {
       const rect = target.getBoundingClientRect();
       const text = (target.innerText || target.textContent || "").replace(/\\s+/g, " ").trim();
       const className = typeof target.className === "string" ? target.className : "";
+      const isCanvas = target.tagName.toLowerCase() === "canvas";
 
       return {
         x: Math.round(rect.left + rect.width / 2),
-        y: Math.round(rect.top + rect.height / 2),
+        y: Math.round(rect.top + rect.height * (isCanvas ? 0.58 : 0.5)),
         tagName: target.tagName.toLowerCase(),
         className: className.slice(0, 120),
         text: text.slice(0, 120),
@@ -438,6 +439,8 @@ async function clickSpin(cdp) {
     return null;
   }
 
+  await dispatchDomClickAtPoint(cdp, target.x, target.y);
+
   await cdp.send("Input.dispatchMouseEvent", {
     type: "mouseMoved",
     x: target.x,
@@ -460,6 +463,81 @@ async function clickSpin(cdp) {
   });
 
   return target;
+}
+
+async function dispatchDomClickAtPoint(cdp, x, y) {
+  const expression = `((x, y) => {
+    const base = document.elementFromPoint(x, y);
+
+    if (!base) {
+      return false;
+    }
+
+    const path = [];
+    let current = base;
+
+    while (current && current !== document.body && path.length < 6) {
+      path.push(current);
+      current = current.parentElement;
+    }
+
+    const common = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: window,
+      clientX: x,
+      clientY: y,
+      screenX: window.screenX + x,
+      screenY: window.screenY + y
+    };
+
+    for (const el of path) {
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+        const EventCtor = type.startsWith("pointer") && window.PointerEvent ? PointerEvent : MouseEvent;
+        el.dispatchEvent(new EventCtor(type, {
+          ...common,
+          pointerId: 1,
+          pointerType: "mouse",
+          isPrimary: true,
+          button: 0,
+          buttons: type.endsWith("down") ? 1 : 0
+        }));
+      }
+
+      if (typeof el.click === "function") {
+        el.click();
+      }
+    }
+
+    if (window.TouchEvent && window.Touch) {
+      const touch = new Touch({
+        identifier: Date.now(),
+        target: base,
+        clientX: x,
+        clientY: y,
+        screenX: window.screenX + x,
+        screenY: window.screenY + y,
+        pageX: window.scrollX + x,
+        pageY: window.scrollY + y
+      });
+
+      for (const type of ["touchstart", "touchend"]) {
+        base.dispatchEvent(new TouchEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          touches: type === "touchend" ? [] : [touch],
+          targetTouches: type === "touchend" ? [] : [touch],
+          changedTouches: [touch]
+        }));
+      }
+    }
+
+    return true;
+  })(${Math.round(x)}, ${Math.round(y)})`;
+
+  await evaluate(cdp, expression);
 }
 
 async function getBodyText(cdp) {
