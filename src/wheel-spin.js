@@ -318,7 +318,9 @@ async function findSpinTarget(cdp) {
         style.opacity !== "0";
     };
 
-    const textPattern = /抽奖|转动|开始|立即|签到|spin|start|draw/i;
+    const textPattern = /抽奖|转动|开始|立即|签到|spin|start|draw|lottery|wheel/i;
+    const strongTextPattern = /^(抽奖|转动|开始|立即抽奖|立即转动|spin|start|draw)$/i;
+    const rejectTextPattern = /返回|首页|back|home|^\$\d+(?:\.\d+)?$|^\d+(?:\.\d+)?$/i;
     const selectors = [
       "button",
       "a",
@@ -336,29 +338,42 @@ async function findSpinTarget(cdp) {
 
     const scored = candidates.map((el, index) => {
       const rect = el.getBoundingClientRect();
-      const text = el.innerText || el.textContent || "";
+      const text = (el.innerText || el.textContent || "").replace(/\\s+/g, " ").trim();
       const className = typeof el.className === "string" ? el.className : "";
+      const id = el.id || "";
+      const ariaLabel = el.getAttribute("aria-label") || "";
       const tagName = el.tagName.toLowerCase();
       const role = el.getAttribute("role") || "";
       const hasClickHandler = typeof el.onclick === "function" || el.hasAttribute("onclick");
+      const semantic = [text, className, id, ariaLabel].join(" ");
       const textMatches = textPattern.test(text);
-      const classMatches = textPattern.test(className);
+      const strongTextMatches = strongTextPattern.test(text);
+      const semanticMatches = textPattern.test(semantic);
       const isNativeControl = tagName === "button" || tagName === "a" || role === "button";
       const isCanvas = tagName === "canvas";
       const area = rect.width * rect.height;
+      const centerX = rect.left + rect.width / 2;
+      const centerY = rect.top + rect.height / 2;
+      const nearPageCenter = Math.abs(centerX - window.innerWidth / 2) < window.innerWidth * 0.3 &&
+        centerY > window.innerHeight * 0.25;
       let score = 0;
 
-      if (isNativeControl) score += 100;
+      if (rejectTextPattern.test(text)) return { el, index, score: -Infinity };
+      if (!semanticMatches && !hasClickHandler && !isCanvas) return { el, index, score: -Infinity };
+
+      if (strongTextMatches) score += 180;
+      if (textMatches) score += 80;
+      if (semanticMatches) score += 60;
+      if (nearPageCenter) score += 60;
       if (hasClickHandler) score += 80;
-      if (textMatches) score += 50;
-      if (classMatches) score += 35;
+      if (isNativeControl) score += tagName === "a" ? 15 : 60;
       if (isCanvas) score += 20;
       if (area > 20000 && area < 250000) score += 10;
       if (area >= window.innerWidth * window.innerHeight * 0.35) score -= 80;
-      if (/返回|首页|back|home/i.test(text)) score -= 120;
+      if (tagName === "a" && !strongTextMatches && !semanticMatches) score -= 80;
 
       return { el, index, score };
-    }).filter(({ score }) => score > 0);
+    }).filter(({ score }) => Number.isFinite(score) && score > 0);
 
     const target = scored
       .sort((a, b) => b.score - a.score || a.index - b.index)[0]?.el;
@@ -390,6 +405,10 @@ async function clickSpin(cdp) {
   const target = await findSpinTarget(cdp);
 
   if (!target) {
+    return null;
+  }
+
+  if (isRejectedTarget(target)) {
     return null;
   }
 
@@ -466,6 +485,10 @@ async function getPageSnapshot(cdp) {
 function describeTarget(target) {
   const label = target.text || target.className || `${target.width}x${target.height}`;
   return `${target.tagName} "${label}" at (${target.x}, ${target.y})`;
+}
+
+function isRejectedTarget(target) {
+  return /返回|首页|back|home|^\$\d+(?:\.\d+)?$|^\d+(?:\.\d+)?$/i.test(target.text || "");
 }
 
 function isConfirmedSpin(before, after) {
