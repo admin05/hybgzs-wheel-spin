@@ -693,6 +693,40 @@ async function createUserDataDir() {
   return fs.mkdtemp(path.join(os.tmpdir(), "hybgzs-wheel-chrome-"));
 }
 
+async function waitForProcessExit(process, timeoutMs = 5000) {
+  if (process.exitCode !== null || process.signalCode !== null) {
+    return true;
+  }
+
+  return await new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      process.off("exit", onExit);
+      resolve(false);
+    }, timeoutMs);
+    const onExit = () => {
+      clearTimeout(timeout);
+      resolve(true);
+    };
+    process.once("exit", onExit);
+  });
+}
+
+async function removeUserDataDir(userDataDir) {
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    try {
+      await fs.rm(userDataDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 300 });
+      return;
+    } catch (error) {
+      if (attempt === 5) {
+        console.warn(`[browser] Could not remove temporary Chromium profile ${userDataDir}: ${error.message}`);
+        return;
+      }
+
+      await sleep(300 * attempt);
+    }
+  }
+}
+
 function launchChrome(userDataDir) {
   const args = [
     `--remote-debugging-port=${DEBUG_PORT}`,
@@ -803,6 +837,7 @@ async function main() {
       const spinNumber = pageUsed + i + 1;
       console.log(`[${today}] Spin ${spinNumber}/${MAX_DAILY_SPINS}...`);
 
+      console.log(`[${today}] Calling wheel API...`);
       const result = await callWheelSpinApi(cdp);
       console.log(`[${today}] Wheel API result: ${describePrize(result)}.`);
       successCount += 1;
@@ -828,8 +863,15 @@ async function main() {
     );
   } finally {
     cdp?.close();
-    chrome.kill("SIGTERM");
-    await fs.rm(userDataDir, { recursive: true, force: true });
+    if (chrome.exitCode === null && chrome.signalCode === null) {
+      chrome.kill("SIGTERM");
+      const exited = await waitForProcessExit(chrome);
+      if (!exited) {
+        chrome.kill("SIGKILL");
+        await waitForProcessExit(chrome, 2000);
+      }
+    }
+    await removeUserDataDir(userDataDir);
   }
 }
 
