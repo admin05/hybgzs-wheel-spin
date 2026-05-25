@@ -321,6 +321,44 @@ async function findSpinTarget(cdp) {
     const textPattern = /抽奖|转动|开始|立即|签到|spin|start|draw|lottery|wheel/i;
     const strongTextPattern = /^(抽奖|转动|开始|立即抽奖|立即转动|spin|start|draw)$/i;
     const rejectTextPattern = /返回|首页|back|home|^\$\d+(?:\.\d+)?$|^\d+(?:\.\d+)?$/i;
+    const getTargetInfo = (target, reason = "candidate") => {
+      target.scrollIntoView({ block: "center", inline: "center" });
+      const rect = target.getBoundingClientRect();
+      const text = (target.innerText || target.textContent || "").replace(/\\s+/g, " ").trim();
+      const className = typeof target.className === "string" ? target.className : "";
+
+      return {
+        x: Math.round(rect.left + rect.width / 2),
+        y: Math.round(rect.top + rect.height / 2),
+        tagName: target.tagName.toLowerCase(),
+        className: className.slice(0, 120),
+        text: text.slice(0, 120),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+        reason
+      };
+    };
+    const startTextElements = Array.from(document.querySelectorAll("body *"))
+      .filter(isVisible)
+      .filter((el) => (el.innerText || el.textContent || "").replace(/\\s+/g, " ").trim() === "开始")
+      .filter((el) => {
+        const rect = el.getBoundingClientRect();
+        return Math.abs(rect.left + rect.width / 2 - window.innerWidth / 2) < window.innerWidth * 0.35 &&
+          rect.top > window.innerHeight * 0.25;
+      });
+    const startTarget = startTextElements
+      .sort((a, b) => {
+        const ar = a.getBoundingClientRect();
+        const br = b.getBoundingClientRect();
+        const ac = Math.abs(ar.left + ar.width / 2 - window.innerWidth / 2);
+        const bc = Math.abs(br.left + br.width / 2 - window.innerWidth / 2);
+        return ac - bc || (ar.width * ar.height) - (br.width * br.height);
+      })[0];
+
+    if (startTarget) {
+      return getTargetInfo(startTarget, "start-text");
+    }
+
     const selectors = [
       "button",
       "a",
@@ -359,6 +397,7 @@ async function findSpinTarget(cdp) {
       let score = 0;
 
       if (rejectTextPattern.test(text)) return { el, index, score: -Infinity };
+      if (centerY < window.innerHeight * 0.18) return { el, index, score: -Infinity };
       if (!semanticMatches && !hasClickHandler && !isCanvas) return { el, index, score: -Infinity };
 
       if (strongTextMatches) score += 180;
@@ -382,20 +421,7 @@ async function findSpinTarget(cdp) {
       return null;
     }
 
-    target.scrollIntoView({ block: "center", inline: "center" });
-    const rect = target.getBoundingClientRect();
-    const text = (target.innerText || target.textContent || "").replace(/\\s+/g, " ").trim();
-    const className = typeof target.className === "string" ? target.className : "";
-
-    return {
-      x: Math.round(rect.left + rect.width / 2),
-      y: Math.round(rect.top + rect.height / 2),
-      tagName: target.tagName.toLowerCase(),
-      className: className.slice(0, 120),
-      text: text.slice(0, 120),
-      width: Math.round(rect.width),
-      height: Math.round(rect.height)
-    };
+    return getTargetInfo(target);
   })()`;
 
   return await evaluate(cdp, expression);
@@ -484,7 +510,8 @@ async function getPageSnapshot(cdp) {
 
 function describeTarget(target) {
   const label = target.text || target.className || `${target.width}x${target.height}`;
-  return `${target.tagName} "${label}" at (${target.x}, ${target.y})`;
+  const reason = target.reason ? ` via ${target.reason}` : "";
+  return `${target.tagName} "${label}" at (${target.x}, ${target.y})${reason}`;
 }
 
 function isRejectedTarget(target) {
