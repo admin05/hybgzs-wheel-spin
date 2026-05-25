@@ -638,150 +638,14 @@ async function waitForConfirmedSpin(cdp, before, timeoutMs = SPIN_RESULT_TIMEOUT
   };
 }
 
-async function getCapNonce(cdp) {
-  const expression = `fetch("/api/cap/challenge", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    credentials: "include",
-    body: JSON.stringify({ action: "wheel_spin" })
-  }).then(async (response) => {
-    const text = await response.text();
-    let json = null;
-
-    try {
-      json = text ? JSON.parse(text) : null;
-    } catch {}
-
-    return {
-      ok: response.ok,
-      status: response.status,
-      statusText: response.statusText,
-      json,
-      text: text.slice(0, 500)
-    };
-  })`;
-
-  const result = await evaluate(cdp, expression);
-
-  if (!result?.ok || !result.json?.success || !result.json?.nonce) {
-    const message = result?.json?.error || result?.text || result?.statusText || "unknown error";
-    throw new Error(`CAP challenge failed: HTTP ${result?.status ?? "unknown"} ${message}`);
-  }
-
-  return result.json.nonce;
-}
-
-async function solveCapToken(cdp) {
-  const nonce = await getCapNonce(cdp);
-  console.log("[cap] Challenge nonce received. Solving CAP token...");
-
-  const expression = `new Promise(async (resolve) => {
-    const scriptUrl = "/_next/static/chunks/0wra6jwa~oum_.js";
-    const timeout = setTimeout(() => resolve({ ok: false, error: "CAP solve timeout" }), 90000);
-
-    try {
-      if (!customElements.get("cap-widget") && !window.Cap) {
-        await new Promise((resolveScript, rejectScript) => {
-          const existing = Array.from(document.scripts).find((script) => script.src.includes("0wra6jwa~oum_.js"));
-
-          if (existing) {
-            existing.addEventListener("load", resolveScript, { once: true });
-            existing.addEventListener("error", rejectScript, { once: true });
-            setTimeout(resolveScript, 3000);
-            return;
-          }
-
-          const script = document.createElement("script");
-          script.src = scriptUrl;
-          script.async = true;
-          script.onload = resolveScript;
-          script.onerror = () => rejectScript(new Error("Could not load CAP widget chunk"));
-          document.head.appendChild(script);
-        });
-      }
-
-      const readyDeadline = Date.now() + 10000;
-      while (!customElements.get("cap-widget") && !window.Cap && Date.now() < readyDeadline) {
-        await new Promise((resolveWait) => setTimeout(resolveWait, 200));
-      }
-
-      if (!customElements.get("cap-widget") && !window.Cap) {
-        throw new Error("CAP widget did not become available");
-      }
-
-      window.CAP_CUSTOM_FETCH = async (url, options = {}) => {
-        const headers = new Headers(options.headers);
-        return fetch(url, {
-          ...options,
-          headers
-        });
-      };
-
-      const widget = document.createElement("cap-widget");
-      widget.setAttribute("data-cap-api-endpoint", "https://cap.hybgzs.com/f96f595e4c/");
-      widget.setAttribute("data-cap-disable-haptics", "");
-      widget.style.cssText = "position:absolute;width:0;height:0;overflow:hidden;pointer-events:none;opacity:0;";
-      document.body.appendChild(widget);
-
-      widget.addEventListener("progress", (event) => {
-        window.__HYBGZS_CAP_PROGRESS = event?.detail?.progress ?? 0;
-      });
-
-      widget.addEventListener("solve", (event) => {
-        const token = event?.detail?.token || widget.token || widget.tokenValue;
-        clearTimeout(timeout);
-        widget.remove();
-        resolve(token ? { ok: true, token } : { ok: false, error: "CAP solved without token" });
-      }, { once: true });
-
-      widget.addEventListener("error", (event) => {
-        clearTimeout(timeout);
-        const message = event?.detail?.message || event?.message || "CAP widget error";
-        widget.remove();
-        resolve({ ok: false, error: message });
-      }, { once: true });
-
-      if (typeof widget.solve !== "function") {
-        throw new Error("CAP widget solve() is unavailable");
-      }
-
-      const result = await widget.solve();
-      const token = result?.token || widget.token || widget.tokenValue;
-
-      if (token) {
-        clearTimeout(timeout);
-        widget.remove();
-        resolve({ ok: true, token });
-      }
-    } catch (error) {
-      clearTimeout(timeout);
-      resolve({ ok: false, error: error.message || String(error) });
-    }
-  })`;
-
-  const result = await evaluate(cdp, expression);
-
-  if (!result?.ok || !result.token) {
-    throw new Error(`CAP solve failed: ${result?.error || "unknown error"}`);
-  }
-
-  return {
-    capNonce: nonce,
-    capToken: result.token
-  };
-}
-
-async function callWheelSpinApi(cdp, capPayload = null) {
-  const body = JSON.stringify(capPayload || {});
+async function callWheelSpinApi(cdp) {
   const expression = `fetch("/api/wheel", {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
     },
     credentials: "include",
-    body: ${JSON.stringify(body)}
+    body: "{}"
   }).then(async (response) => {
     const text = await response.text();
     let json = null;
@@ -803,10 +667,10 @@ async function callWheelSpinApi(cdp, capPayload = null) {
 
   if (!result?.ok) {
     const message = result?.json?.error || result?.text || result?.statusText || "unknown error";
-    if (result?.status === 400 && /人机验证|验证/.test(message) && !capPayload) {
-      console.log("[cap] Wheel API requires human verification.");
-      const solvedCapPayload = await solveCapToken(cdp);
-      return await callWheelSpinApi(cdp, solvedCapPayload);
+    if (/人机验证|自动化浏览器|验证/.test(message)) {
+      throw new Error(
+        `Wheel requires manual human verification and refused automation: HTTP ${result?.status ?? "unknown"} ${message}`
+      );
     }
 
     throw new Error(`Wheel API failed: HTTP ${result?.status ?? "unknown"} ${message}`);
