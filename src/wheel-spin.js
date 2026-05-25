@@ -566,13 +566,6 @@ async function main() {
   const state = await readState();
   const today = getTodayKey();
   const used = Number(state[today]?.spins || 0);
-  const remaining = Math.max(0, MAX_DAILY_SPINS - used);
-
-  if (remaining === 0) {
-    console.log(`[${today}] Already recorded ${used}/${MAX_DAILY_SPINS} spins. Nothing to do.`);
-    await safePushBark("幸运转盘", `${today} 本地记录已完成 ${used}/${MAX_DAILY_SPINS}，无需重复执行。`);
-    return;
-  }
 
   const userDataDir = await createUserDataDir();
   const chrome = launchChrome(userDataDir);
@@ -602,6 +595,16 @@ async function main() {
 
     const initialSnapshot = await getPageSnapshot(cdp);
     const pageRemaining = initialSnapshot.remaining;
+    const pageUsed = pageRemaining === null ? used : Math.max(0, MAX_DAILY_SPINS - pageRemaining);
+    const remaining = pageRemaining === null ? Math.max(0, MAX_DAILY_SPINS - used) : pageRemaining;
+
+    if (pageRemaining !== null && used !== pageUsed) {
+      console.log(
+        `[${today}] Local record ${used}/${MAX_DAILY_SPINS} differs from page ${pageUsed}/${MAX_DAILY_SPINS}; using page state.`
+      );
+    } else if (remaining === 0) {
+      console.log(`[${today}] Already recorded ${used}/${MAX_DAILY_SPINS} spins. Verifying against page state.`);
+    }
 
     if (pageRemaining === 0 || initialSnapshot.limitReached) {
       console.log(`[${today}] Page says no spins remain today. Recording ${MAX_DAILY_SPINS}/${MAX_DAILY_SPINS}.`);
@@ -615,10 +618,10 @@ async function main() {
     }
 
     let successCount = 0;
-    const spinLimit = pageRemaining === null ? remaining : Math.min(remaining, pageRemaining);
+    const spinLimit = remaining;
 
     for (let i = 0; i < spinLimit; i += 1) {
-      const spinNumber = used + i + 1;
+      const spinNumber = pageUsed + i + 1;
       console.log(`[${today}] Spin ${spinNumber}/${MAX_DAILY_SPINS}...`);
 
       const before = await getPageSnapshot(cdp);
@@ -656,7 +659,7 @@ async function main() {
     }
 
     state[today] = {
-      spins: used + successCount,
+      spins: Math.min(MAX_DAILY_SPINS, pageUsed + successCount),
       updatedAt: new Date().toISOString()
     };
 
