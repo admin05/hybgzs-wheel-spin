@@ -8,6 +8,7 @@ const TARGET_URL = process.env.HYBGZS_WHEEL_URL || "https://cdk.hybgzs.com/enter
 const COOKIE = process.env.HYBGZS_COOKIE || "";
 const MAX_DAILY_SPINS = Number(process.env.HYBGZS_MAX_DAILY_SPINS || 3);
 const CLICK_INTERVAL_MS = Number(process.env.HYBGZS_CLICK_INTERVAL_MS || 9000);
+const SPIN_RESULT_TIMEOUT_MS = Number(process.env.HYBGZS_SPIN_RESULT_TIMEOUT_MS || Math.max(CLICK_INTERVAL_MS, 12000));
 const HEADLESS = process.env.HEADLESS !== "false";
 const STATE_FILE = process.env.STATE_FILE || path.resolve("wheel-state.json");
 const CHROME_BIN = process.env.CHROME_BIN || "";
@@ -305,7 +306,7 @@ async function setCookies(cdp) {
   await cdp.send("Network.setCookies", { cookies });
 }
 
-async function clickSpin(cdp) {
+async function findSpinTarget(cdp) {
   const expression = `(() => {
     const isVisible = (el) => {
       const rect = el.getBoundingClientRect();
@@ -322,6 +323,7 @@ async function clickSpin(cdp) {
       "button",
       "a",
       "[role='button']",
+      "[onclick]",
       "[class*='spin']",
       "[class*='wheel']",
       "[class*='start']",
@@ -332,49 +334,87 @@ async function clickSpin(cdp) {
     const candidates = Array.from(document.querySelectorAll(selectors.join(",")))
       .filter(isVisible);
 
-    let target = candidates.find((el) => {
+    const scored = candidates.map((el, index) => {
+      const rect = el.getBoundingClientRect();
       const text = el.innerText || el.textContent || "";
       const className = typeof el.className === "string" ? el.className : "";
-      return textPattern.test(text) || textPattern.test(className);
-    });
+      const tagName = el.tagName.toLowerCase();
+      const role = el.getAttribute("role") || "";
+      const hasClickHandler = typeof el.onclick === "function" || el.hasAttribute("onclick");
+      const textMatches = textPattern.test(text);
+      const classMatches = textPattern.test(className);
+      const isNativeControl = tagName === "button" || tagName === "a" || role === "button";
+      const isCanvas = tagName === "canvas";
+      const area = rect.width * rect.height;
+      let score = 0;
+
+      if (isNativeControl) score += 100;
+      if (hasClickHandler) score += 80;
+      if (textMatches) score += 50;
+      if (classMatches) score += 35;
+      if (isCanvas) score += 20;
+      if (area > 20000 && area < 250000) score += 10;
+      if (area >= window.innerWidth * window.innerHeight * 0.35) score -= 80;
+      if (/返回|首页|back|home/i.test(text)) score -= 120;
+
+      return { el, index, score };
+    }).filter(({ score }) => score > 0);
+
+    const target = scored
+      .sort((a, b) => b.score - a.score || a.index - b.index)[0]?.el;
 
     if (!target) {
-      target = candidates
-        .slice()
-        .sort((a, b) => {
-          const ar = a.getBoundingClientRect();
-          const br = b.getBoundingClientRect();
-          return br.width * br.height - ar.width * ar.height;
-        })[0];
-    }
-
-    if (!target) {
-      return false;
+      return null;
     }
 
     target.scrollIntoView({ block: "center", inline: "center" });
     const rect = target.getBoundingClientRect();
-    const x = rect.left + rect.width / 2;
-    const y = rect.top + rect.height / 2;
+    const text = (target.innerText || target.textContent || "").replace(/\\s+/g, " ").trim();
+    const className = typeof target.className === "string" ? target.className : "";
 
-    for (const type of ["pointerdown", "mousedown", "mouseup", "pointerup", "click"]) {
-      target.dispatchEvent(new MouseEvent(type, {
-        bubbles: true,
-        cancelable: true,
-        view: window,
-        clientX: x,
-        clientY: y
-      }));
-    }
-
-    if (typeof target.click === "function") {
-      target.click();
-    }
-
-    return true;
+    return {
+      x: Math.round(rect.left + rect.width / 2),
+      y: Math.round(rect.top + rect.height / 2),
+      tagName: target.tagName.toLowerCase(),
+      className: className.slice(0, 120),
+      text: text.slice(0, 120),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height)
+    };
   })()`;
 
-  return Boolean(await evaluate(cdp, expression));
+  return await evaluate(cdp, expression);
+}
+
+async function clickSpin(cdp) {
+  const target = await findSpinTarget(cdp);
+
+  if (!target) {
+    return null;
+  }
+
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    x: target.x,
+    y: target.y,
+    button: "none"
+  });
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: target.x,
+    y: target.y,
+    button: "left",
+    clickCount: 1
+  });
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: target.x,
+    y: target.y,
+    button: "left",
+    clickCount: 1
+  });
+
+  return target;
 }
 
 async function getBodyText(cdp) {
@@ -393,6 +433,81 @@ function getRemainingSpinsFromText(text) {
   }
 
   return Number(match[1]);
+}
+
+function getAccountBalanceFromText(text) {
+  const match = text.match(/\$(\d+(?:\.\d+)?)/);
+
+  if (!match) {
+    return null;
+  }
+
+  return Number(match[1]);
+}
+
+function summarizeText(text) {
+  return text.slice(0, 500).replace(/\s+/g, " ").trim();
+}
+
+function getSnapshotFromText(text) {
+  return {
+    text,
+    summary: summarizeText(text),
+    remaining: getRemainingSpinsFromText(text),
+    balance: getAccountBalanceFromText(text),
+    limitReached: hasReachedDailyLimit(text)
+  };
+}
+
+async function getPageSnapshot(cdp) {
+  return getSnapshotFromText(await getBodyText(cdp));
+}
+
+function describeTarget(target) {
+  const label = target.text || target.className || `${target.width}x${target.height}`;
+  return `${target.tagName} "${label}" at (${target.x}, ${target.y})`;
+}
+
+function isConfirmedSpin(before, after) {
+  if (after.limitReached) {
+    return true;
+  }
+
+  if (before.remaining !== null && after.remaining !== null) {
+    return after.remaining < before.remaining;
+  }
+
+  if (before.balance !== null && after.balance !== null && after.balance !== before.balance) {
+    return true;
+  }
+
+  if (before.remaining !== null || before.balance !== null) {
+    return false;
+  }
+
+  return before.text !== after.text;
+}
+
+async function waitForConfirmedSpin(cdp, before, timeoutMs = SPIN_RESULT_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  let latest = before;
+
+  while (Date.now() < deadline) {
+    await sleep(500);
+    latest = await getPageSnapshot(cdp);
+
+    if (isConfirmedSpin(before, latest)) {
+      return {
+        confirmed: true,
+        snapshot: latest
+      };
+    }
+  }
+
+  return {
+    confirmed: false,
+    snapshot: latest
+  };
 }
 
 async function createUserDataDir() {
@@ -485,10 +600,10 @@ async function main() {
     await cdp.send("Page.navigate", { url: TARGET_URL });
     await waitForLoad(cdp);
 
-    const initialBodyText = await getBodyText(cdp);
-    const pageRemaining = getRemainingSpinsFromText(initialBodyText);
+    const initialSnapshot = await getPageSnapshot(cdp);
+    const pageRemaining = initialSnapshot.remaining;
 
-    if (pageRemaining === 0 || hasReachedDailyLimit(initialBodyText)) {
+    if (pageRemaining === 0 || initialSnapshot.limitReached) {
       console.log(`[${today}] Page says no spins remain today. Recording ${MAX_DAILY_SPINS}/${MAX_DAILY_SPINS}.`);
       state[today] = {
         spins: MAX_DAILY_SPINS,
@@ -506,23 +621,35 @@ async function main() {
       const spinNumber = used + i + 1;
       console.log(`[${today}] Spin ${spinNumber}/${MAX_DAILY_SPINS}...`);
 
-      const clicked = await clickSpin(cdp);
+      const before = await getPageSnapshot(cdp);
+      const target = await clickSpin(cdp);
 
-      if (!clicked) {
+      if (!target) {
         throw new Error("Could not find the wheel spin button/control. The page selector may need adjustment.");
       }
 
-      successCount += 1;
-      await sleep(CLICK_INTERVAL_MS);
+      console.log(`[${today}] Clicked ${describeTarget(target)}.`);
 
-      const bodyText = await getBodyText(cdp);
-      const summary = bodyText.slice(0, 500).replace(/\s+/g, " ").trim();
+      const result = await waitForConfirmedSpin(cdp, before);
+      const { snapshot } = result;
 
-      if (summary) {
-        console.log(`[${today}] Page text: ${summary}`);
+      if (snapshot.summary) {
+        console.log(`[${today}] Page text: ${snapshot.summary}`);
       }
 
-      if (hasReachedDailyLimit(bodyText)) {
+      if (!result.confirmed) {
+        const details = [
+          `Clicked target did not change page state within ${SPIN_RESULT_TIMEOUT_MS} ms.`,
+          `Target: ${describeTarget(target)}.`,
+          `Remaining before/after: ${before.remaining ?? "unknown"}/${snapshot.remaining ?? "unknown"}.`,
+          `Balance before/after: ${before.balance ?? "unknown"}/${snapshot.balance ?? "unknown"}.`
+        ];
+        throw new Error(details.join(" "));
+      }
+
+      successCount += 1;
+
+      if (snapshot.limitReached) {
         console.log(`[${today}] Page says daily limit reached.`);
         break;
       }
